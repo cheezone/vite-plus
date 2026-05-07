@@ -178,7 +178,9 @@ for (const napiTarget of pkg.napi.targets) {
 
   if (skipNpmPublish) {
     // eslint-disable-next-line no-console
-    console.log(`Prepared CLI package: @voidzero-dev/vite-plus-cli-${platformArchABI}@${cliVersion}`);
+    console.log(
+      `Prepared CLI package: @voidzero-dev/vite-plus-cli-${platformArchABI}@${cliVersion}`,
+    );
     continue;
   }
 

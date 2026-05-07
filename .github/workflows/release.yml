@@ -36,6 +36,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
       - uses: ./.github/actions/set-snapshot-version
         if: ${{ inputs.version == '' }}
         id: computed
@@ -44,7 +45,10 @@ jobs:
 
       - name: Set final version
         id: version
-        run: echo "version=${{ inputs.version || steps.computed.outputs.version }}" >> $GITHUB_OUTPUT
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          COMPUTED_VERSION: ${{ steps.computed.outputs.version }}
+        run: echo "version=${INPUT_VERSION:-$COMPUTED_VERSION}" >> "$GITHUB_OUTPUT"
 
   build-rust:
     name: Build bindings and binaries
@@ -154,27 +158,30 @@ jobs:
 
       - name: Publish
         run: |
-          pnpm publish --filter=./packages/core --tag ${{ inputs.npm_tag }} --access public --no-git-checks
-          pnpm publish --filter=./packages/test --tag ${{ inputs.npm_tag }} --access public --no-git-checks
-          pnpm publish --filter=./packages/cli --tag ${{ inputs.npm_tag }} --access public --no-git-checks
+          pnpm publish --filter=./packages/core --tag "${NPM_TAG}" --access public --no-git-checks
+          pnpm publish --filter=./packages/test --tag "${NPM_TAG}" --access public --no-git-checks
+          pnpm publish --filter=./packages/cli --tag "${NPM_TAG}" --access public --no-git-checks
 
       - name: Create release body
+        env:
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          if [[ "${{ inputs.npm_tag }}" == "latest" ]]; then
+          if [[ "${NPM_TAG}" == "latest" ]]; then
             INSTALL_BASH="curl -fsSL https://vite.plus | bash"
             INSTALL_PS1="irm https://vite.plus/ps1 | iex"
           else
-            INSTALL_BASH="curl -fsSL https://vite.plus | VP_VERSION=${{ env.VERSION }} bash"
-            INSTALL_PS1="\\\$env:VP_VERSION=\\\"${{ env.VERSION }}\\\"; irm https://vite.plus/ps1 | iex"
+            INSTALL_BASH="curl -fsSL https://vite.plus | VP_VERSION=${VERSION} bash"
+            INSTALL_PS1="\\\$env:VP_VERSION=\\\"${VERSION}\\\"; irm https://vite.plus/ps1 | iex"
           fi
           cat > ./RELEASE_BODY.md <<EOF
-          ## vite-plus v${{ env.VERSION }}
+          ## vite-plus v${VERSION}
 
           ### Published Packages
 
-          - \`@voidzero-dev/vite-plus-core@${{ env.VERSION }}\`
-          - \`@voidzero-dev/vite-plus-test@${{ env.VERSION }}\`
-          - \`vite-plus@${{ env.VERSION }}\`
+          - \`@voidzero-dev/vite-plus-core@${VERSION}\`
+          - \`@voidzero-dev/vite-plus-test@${VERSION}\`
+          - \`vite-plus@${VERSION}\`
 
           ### Installation
 
@@ -190,7 +197,7 @@ jobs:
 
           Or download and run \`vp-setup.exe\` from the assets below.
 
-          View the full commit: https://github.com/${{ github.repository }}/commit/${{ github.sha }}
+          View the full commit: https://github.com/${REPOSITORY}/commit/${COMMIT_SHA}
           EOF
 
       - name: Create GitHub Release
