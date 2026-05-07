@@ -45,27 +45,33 @@ await cli.prePublish({
 const npmDir = join(currentDir, 'npm');
 const platformDirs = await readdir(npmDir);
 
+// Skip the actual `npm publish` calls (and the cli-npm cleanup below) so a
+// caller like the pkg.pr.new workflow can pick up the prepared directories.
+const skipNpmPublish = process.env.SKIP_NPM_PUBLISH === 'true';
+
 // Publish each NAPI platform package (without vp binary)
 const npmTag = process.env.NPM_TAG || 'latest';
-for (const file of platformDirs) {
-  try {
-    const output = execSync(`npm publish --tag ${npmTag} --access public`, {
-      cwd: join(currentDir, 'npm', file),
-      env: process.env,
-      stdio: 'pipe',
-    });
-    process.stdout.write(output);
-  } catch (e) {
-    if (
-      e instanceof Error &&
-      e.message.includes('You cannot publish over the previously published versions')
-    ) {
-      // eslint-disable-next-line no-console
-      console.info(e.message);
-      // eslint-disable-next-line no-console
-      console.warn(`${file} has been published, skipping`);
-    } else {
-      throw e;
+if (!skipNpmPublish) {
+  for (const file of platformDirs) {
+    try {
+      const output = execSync(`npm publish --tag ${npmTag} --access public`, {
+        cwd: join(currentDir, 'npm', file),
+        env: process.env,
+        stdio: 'pipe',
+      });
+      process.stdout.write(output);
+    } catch (e) {
+      if (
+        e instanceof Error &&
+        e.message.includes('You cannot publish over the previously published versions')
+      ) {
+        // eslint-disable-next-line no-console
+        console.info(e.message);
+        // eslint-disable-next-line no-console
+        console.warn(`${file} has been published, skipping`);
+      } else {
+        throw e;
+      }
     }
   }
 }
@@ -130,6 +136,12 @@ for (const napiTarget of pkg.napi.targets) {
   };
   writeFileSync(join(platformCliDir, 'package.json'), JSON.stringify(cliPackage, null, 2) + '\n');
 
+  if (skipNpmPublish) {
+    // eslint-disable-next-line no-console
+    console.log(`Prepared CLI package: @voidzero-dev/vite-plus-cli-${platformArchABI}@${cliVersion}`);
+    continue;
+  }
+
   // Publish CLI package
   execSync(`npm publish --tag ${npmTag} --access public`, {
     cwd: platformCliDir,
@@ -141,5 +153,7 @@ for (const napiTarget of pkg.napi.targets) {
   console.log(`Published CLI package: @voidzero-dev/vite-plus-cli-${platform}@${cliVersion}`);
 }
 
-// Clean up cli-npm directory
-rmSync(cliNpmDir, { recursive: true, force: true });
+// Clean up cli-npm directory (skipped when caller still needs the prepared dirs).
+if (!skipNpmPublish) {
+  rmSync(cliNpmDir, { recursive: true, force: true });
+}
