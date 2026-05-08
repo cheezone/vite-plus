@@ -123,6 +123,14 @@ jobs:
           path: ./packages/core/dist
           if-no-files-found: error
 
+      - name: Upload prompts dist
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ matrix.settings.target == 'x86_64-unknown-linux-gnu' }}
+        with:
+          name: prompts
+          path: ./packages/prompts/dist
+          if-no-files-found: error
+
       - name: Upload cli dist
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ matrix.settings.target == 'x86_64-unknown-linux-gnu' }}
