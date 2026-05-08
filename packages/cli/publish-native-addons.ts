@@ -41,7 +41,9 @@ if (!VERSION) {
 const rustCliArtifactsDir = join(repoRoot, 'rust-cli-artifacts');
 if (existsSync(rustCliArtifactsDir)) {
   for (const dir of await readdir(rustCliArtifactsDir)) {
-    if (!dir.startsWith('vite-global-cli-')) continue;
+    if (!dir.startsWith('vite-global-cli-')) {
+      continue;
+    }
     const target = dir.slice('vite-global-cli-'.length);
     const releaseDir = join(repoRoot, 'target', target, 'release');
     mkdirSync(releaseDir, { recursive: true });
