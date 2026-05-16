@@ -167,7 +167,7 @@ minimumReleaseAgeExclude:
   - vue-virtual-scroller
   - lodash-es@4.18.1
 overrides:
-  rolldown: workspace:rolldown@*
+  rolldown: https://pkg.pr.new/rolldown/rolldown@9413
   vite: workspace:@voidzero-dev/vite-plus-core@*
   vitest: workspace:@voidzero-dev/vite-plus-test@*
   vitest-dev: npm:vitest@^4.1.6
