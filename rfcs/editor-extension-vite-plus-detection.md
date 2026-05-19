@@ -44,9 +44,11 @@ install hoisted from an unrelated dependency tree.
 > workspace folder may sit at, inside, or alongside a root workspace.
 
 The runnable `vp` binary is resolved separately: walk up from the
-declaring ancestor for `node_modules/vite-plus/bin/vp` with a sibling
-`package.json` that parses and has `name === "vite-plus"`, bounded by
-the root workspace.
+declaring ancestor and, at each ancestor inside the root workspace,
+validate `node_modules/vite-plus/package.json` (parses, `name ===
+"vite-plus"`) then return `node_modules/.bin/vp` (the package
+manager's shim — same path the extensions already use for
+`oxlint`/`oxfmt`). On Windows, `.bin/vp.cmd` is the equivalent shim.
 
 ```
 fn detect_vite_plus_project(start: AbsolutePath) -> Option<Result>:
@@ -109,14 +111,13 @@ flowchart TD
     P1Bound -- yes --> ResultNull(["return null"])
 
     P1Found --> P2Begin[/"PHASE 2<br/>find runnable binary<br/>probe = root"/]
-    P2Begin --> P2Check["check probe/node_modules/vite-plus/bin/vp"]
-    P2Check --> P2Exists{"binary exists?"}
-    P2Exists -- yes --> P2Valid{"node_modules/vite-plus/package.json<br/>parses with name = 'vite-plus'?"}
-    P2Valid -- yes --> ResultRunnable(["return { root, vpPath }"])
-    P2Valid -- no, orphan --> P2Bound
-    P2Exists -- no --> P2Bound{"probe is root workspace<br/>or filesystem root?"}
+    P2Begin --> P2Valid{"probe/node_modules/vite-plus/package.json<br/>parses with name = 'vite-plus'?"}
+    P2Valid -- yes --> P2Shim{"probe/node_modules/.bin/vp<br/>(or vp.cmd on Windows)<br/>exists?"}
+    P2Shim -- yes --> ResultRunnable(["return { root, vpPath }"])
+    P2Shim -- no --> P2Bound
+    P2Valid -- no, orphan --> P2Bound{"probe is root workspace<br/>or filesystem root?"}
     P2Bound -- no --> P2Up["probe = parent(probe)"]
-    P2Up --> P2Check
+    P2Up --> P2Valid
     P2Bound -- yes --> ResultDeclared(["return { root }"])
 ```
 
@@ -186,10 +187,13 @@ function declaresVitePlus(pkg: any | null): boolean {
   return Boolean(pkg?.dependencies?.['vite-plus'] || pkg?.devDependencies?.['vite-plus']);
 }
 
-/** `bin/vp` exists AND the sibling package.json identifies as vite-plus. */
+/**
+ * Validate that `node_modules/vite-plus` at `dir` is a real vite-plus
+ * install, then return the package manager's `.bin/vp` shim path.
+ * The shim is the conventional entry point that extensions already
+ * use for oxlint/oxfmt.
+ */
 function resolveVpAt(dir: string): string | null {
-  const vpPath = join(dir, 'node_modules', 'vite-plus', 'bin', 'vp');
-  if (!existsSync(vpPath)) return null;
   try {
     const pkg = JSON.parse(
       readFileSync(join(dir, 'node_modules', 'vite-plus', 'package.json'), 'utf8'),
@@ -198,7 +202,15 @@ function resolveVpAt(dir: string): string | null {
   } catch {
     return null;
   }
-  return vpPath;
+  const binDir = join(dir, 'node_modules', '.bin');
+  const candidates =
+    process.platform === 'win32'
+      ? [join(binDir, 'vp.cmd'), join(binDir, 'vp.exe'), join(binDir, 'vp')]
+      : [join(binDir, 'vp')];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 export function detectVitePlusProjectSync(start: string): DetectResult | null {
@@ -249,42 +261,56 @@ All four extensions run the detector first, then:
   launch failure, surface an upgrade hint.
 - `{ root }` → surface an install hint; do not launch anything Vite+.
 
-Specifics:
+**On the launch path.** Validation (parsing
+`node_modules/vite-plus/package.json` and checking `name`) is the
+same everywhere. The path returned for spawning differs by extension,
+mirroring whatever pattern that extension already uses for
+`oxlint`/`oxfmt`:
 
-- **`oxc-vscode`, `coc-oxc`** — call the detector before the existing
+- **`oxc-vscode`, `coc-oxc`** — target `node_modules/.bin/vp` (with
+  `.cmd`/`.exe` Windows variants), the same shim path they already
+  use for `oxlint`. Call the detector before the existing
   `findBinary("oxlint" | "oxfmt", ...)` chain. Do **not** parameterize
   the existing chain with `"vp"` as a target — its
   `searchSettingsBin`, `searchGlobalNodeModulesBin`, `searchEnvPath`,
-  and `require.resolve` paths can escape the workspace boundary or
+  and `require.resolve` paths can escape the root workspace or
   consult settings meant for oxlint/oxfmt.
-- **`oxc-zed`** — replace the `[package_name, "vite-plus"]` loop at
+- **`oxc-zed`** — keep targeting `node_modules/vite-plus/bin/vp` (the
+  pattern Zed already uses, `src/lsp.rs:47`, because pnpm's `.bin`
+  shell shims aren't suitable for Zed's headless WASM execution
+  context). Replace the `[package_name, "vite-plus"]` loop at
   `lsp.rs:28` with the two-phase check ported into Rust. Update
   `language_server_command` to pass `["lint", "--lsp"]` /
-  `["fmt", "--lsp"]` when launching `vp`. Zed's WASM API only reads
-  the worktree root, so deeper walk-up is a known limitation worth
-  noting in the Zed PR.
+  `["fmt", "--lsp"]`. Zed's WASM API only reads the worktree root, so
+  deeper walk-up is a known limitation worth noting in the Zed PR.
 - **`oxc-intellij-plugin`** — `VitePlusPackage.kt` already locates
-  `vite-plus` via IntelliJ's `NodePackageDescriptor`. Tighten it to
-  require a direct dep, change the returned path from
-  `<vite-plus>/bin/oxlint` to `<vite-plus>/bin/vp`, update launch
-  args.
+  `vite-plus` via IntelliJ's `NodePackageDescriptor` and appends
+  `bin/<name>`. Tighten it to require a direct dep, change the
+  returned path from `<vite-plus>/bin/oxlint` to `<vite-plus>/bin/vp`,
+  update launch args.
 
 ## Conformance fixtures
 
-Every implementation must produce identical answers on these
-fixtures. Each extension replicates the set in its own test suite.
+Every implementation must produce identical `root` values and the
+same null vs. non-null determination on these fixtures.
 
-| Fixture                                 | Tree                                                                                                                                           | Expected result                                                                                                      |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `root-declared-and-installed`           | Root `package.json` declares `vite-plus` + valid `node_modules/vite-plus/` install                                                             | `{ root: "<repo>", vpPath: "<repo>/node_modules/vite-plus/bin/vp" }`                                                 |
-| `pnpm-subpackage-declared-root-hoisted` | `pnpm-workspace.yaml` at `<repo>`, `packages/app/package.json` declares `vite-plus`, install hoisted to `<repo>/node_modules/vite-plus/`       | From `packages/app/`: `{ root: "<repo>/packages/app", vpPath: "<repo>/node_modules/vite-plus/bin/vp" }`              |
-| `npm-subpackage-direct-dep-unhoisted`   | Root `package.json` with `workspaces`, `packages/app/package.json` declares `vite-plus`, install inside `packages/app/node_modules/vite-plus/` | From `packages/app/`: `{ root: "<repo>/packages/app", vpPath: "<repo>/packages/app/node_modules/vite-plus/bin/vp" }` |
-| `root-declared-no-install`              | Root `package.json` declares `vite-plus`, no `node_modules` (fresh clone)                                                                      | `{ root: "<repo>" }` — install hint                                                                                  |
-| `transitive-install`                    | No walked-up `package.json` declares `vite-plus`, but `node_modules/vite-plus/` exists as a transitive dep                                     | `null` — no direct declaration                                                                                       |
-| `bin-vp-orphan`                         | Declared in root `package.json`, but `node_modules/vite-plus/` is broken (missing `package.json`, wrong `name`, or unparseable)                | `{ root: "<repo>" }` — install rejected as orphan                                                                    |
-| `parent-vite-plus-nested-repo`          | Outer dir declares + installs `vite-plus`; inner subdir is its own root workspace and does not                                                 | From inside the nested workspace: `null`                                                                             |
-| `plain-non-vite-plus`                   | A normal Node project, no `vite-plus` anywhere                                                                                                 | `null`                                                                                                               |
-| `yarn4-pnp`                             | Berry/PnP, no `node_modules`, root `package.json` declares `vite-plus`                                                                         | `{ root: "<repo>" }` — install hint                                                                                  |
+The `vpPath` values below show the path the **TypeScript reference**
+produces (`node_modules/.bin/vp`); ports that target
+`node_modules/vite-plus/bin/vp` instead — Zed today, possibly
+IntelliJ — substitute their own equivalent. The fixture just asserts
+"vpPath is set and runs the validated install."
+
+| Fixture                                 | Tree                                                                                                                                           | Expected result                                                                                             |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `root-declared-and-installed`           | Root `package.json` declares `vite-plus` + valid `node_modules/vite-plus/` install                                                             | `{ root: "<repo>", vpPath: "<repo>/node_modules/.bin/vp" }`                                                 |
+| `pnpm-subpackage-declared-root-hoisted` | `pnpm-workspace.yaml` at `<repo>`, `packages/app/package.json` declares `vite-plus`, install hoisted to `<repo>/node_modules/vite-plus/`       | From `packages/app/`: `{ root: "<repo>/packages/app", vpPath: "<repo>/node_modules/.bin/vp" }`              |
+| `npm-subpackage-direct-dep-unhoisted`   | Root `package.json` with `workspaces`, `packages/app/package.json` declares `vite-plus`, install inside `packages/app/node_modules/vite-plus/` | From `packages/app/`: `{ root: "<repo>/packages/app", vpPath: "<repo>/packages/app/node_modules/.bin/vp" }` |
+| `root-declared-no-install`              | Root `package.json` declares `vite-plus`, no `node_modules` (fresh clone)                                                                      | `{ root: "<repo>" }` — install hint                                                                         |
+| `transitive-install`                    | No walked-up `package.json` declares `vite-plus`, but `node_modules/vite-plus/` exists as a transitive dep                                     | `null` — no direct declaration                                                                              |
+| `bin-vp-orphan`                         | Declared in root `package.json`, but `node_modules/vite-plus/` is broken (missing `package.json`, wrong `name`, or unparseable)                | `{ root: "<repo>" }` — install rejected as orphan                                                           |
+| `parent-vite-plus-nested-repo`          | Outer dir declares + installs `vite-plus`; inner subdir is its own root workspace and does not                                                 | From inside the nested workspace: `null`                                                                    |
+| `plain-non-vite-plus`                   | A normal Node project, no `vite-plus` anywhere                                                                                                 | `null`                                                                                                      |
+| `yarn4-pnp`                             | Berry/PnP, no `node_modules`, root `package.json` declares `vite-plus`                                                                         | `{ root: "<repo>" }` — install hint                                                                         |
 
 ## Open questions
 
