@@ -211,12 +211,12 @@ impl PackageManager {
                 let can_use_native_yarn = !self.version.starts_with("1.")
                     && options.target.is_none()
                     && !options.recursive
-                    && options.filters.map_or(true, |filters| filters.is_empty())
+                    && options.filters.is_none_or(|filters| filters.is_empty())
                     && options.publish_branch.is_none()
                     && !options.report_summary
                     && options
                         .pass_through_args
-                        .map_or(true, |pass_through_args| pass_through_args.is_empty())
+                        .is_none_or(|pass_through_args| pass_through_args.is_empty())
                     && !options.force;
 
                 if can_use_native_yarn {

@@ -5918,6 +5918,7 @@ dependencies = [
  "nom 8.0.0",
  "oxc",
  "oxc_index",
+ "oxc_str",
  "rayon",
  "regex",
  "regress",
