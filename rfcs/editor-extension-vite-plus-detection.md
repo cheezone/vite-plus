@@ -47,12 +47,19 @@ install hoisted from an unrelated dependency tree.
 > Zed, etc.). The two concepts are distinct: a single editor
 > workspace folder may sit at, inside, or alongside a root workspace.
 
-The runnable `vp` binary is resolved separately: walk up from the
-declaring ancestor and, at each ancestor inside the root workspace,
-validate `node_modules/vite-plus/package.json` (parses, `name ===
-"vite-plus"`) then return `node_modules/.bin/vp` (the package
-manager's shim — same path the extensions already use for
-`oxlint`/`oxfmt`). On Windows, `.bin/vp.cmd` is the equivalent shim.
+The runnable `vp` binary is resolved separately, in two steps:
+
+1. **Project-scoped lookup.** Walk up from the declaring ancestor and,
+   at each ancestor inside the root workspace, return
+   `node_modules/.bin/vp` if it exists (the package manager's shim,
+   same path the extensions already use for `oxlint`/`oxfmt`). On
+   Windows, `.bin/vp.cmd` is the equivalent shim.
+2. **Global fallback.** If no project-scoped install was found,
+   search global locations: `$PATH`, and (per extension) globally
+   installed `node_modules` (`npm root -g`, `pnpm root -g`, bun's
+   global directory). A globally installed `vp` is acceptable at
+   this step because Phase 1 has already confirmed the user wants
+   Vite+; the global binary just provides the means.
 
 ```
 fn detect_vite_plus_project(start: AbsolutePath) -> Option<Result>:
@@ -66,17 +73,22 @@ fn detect_vite_plus_project(start: AbsolutePath) -> Option<Result>:
     if root is None:
         return None  # not a Vite+ project
 
-    # Phase 2: resolve the runnable binary, scoped to the workspace.
+    # Phase 2: resolve a project-scoped binary, bounded by the root workspace.
     vp_path = walk_up_to_root_workspace(root, |dir, _|:
-        return valid_vite_plus_install_at(dir)  # bin/vp + sibling package.json with correct name
+        return shim_at(dir / "node_modules" / ".bin" / "vp")  # exists?
     )
 
-    return Some({ root, vp_path })  # vp_path may be None
+    # Phase 3: fall back to a global binary now that Vite+ is confirmed.
+    if vp_path is None:
+        vp_path = resolve_global_vp()  # $PATH and global node_modules
+
+    return Some({ root, vp_path })  # vp_path may still be None
 ```
 
-Both phases stop AT the root workspace and never cross into its
-parent. The walk-up bound is what prevents a nested checkout from
-inheriting an unrelated parent's Vite+ install.
+Phases 1 and 2 stop AT the root workspace and never cross into its
+parent — that bound prevents a nested checkout from inheriting an
+unrelated parent's Vite+ install. Phase 3 is unbounded by design;
+the user has already opted in to Vite+ by declaring it.
 
 ### Start path per extension
 
@@ -113,15 +125,16 @@ file, ...)`); the file's actual path is the most precise input and
 
 - **`null`** — not a Vite+ project. Editor uses plain `oxlint` /
   `oxfmt`.
-- **`{ root, vpPath }`** — Vite+ and runnable. Editor launches
-  `<vpPath> lint --lsp` / `<vpPath> fmt --lsp`. If launching errors
-  (e.g. a very old `vite-plus` whose `vp` doesn't yet recognize
-  `--lsp`), surface an "upgrade vite-plus" hint at that point.
-- **`{ root }`** — declared but not installed (fresh clone,
-  pre-`pnpm install`, Berry PnP without `node_modules`, broken
-  install). Editor surfaces an install hint such as
-  _"Vite+ detected — run `pnpm install` to enable LSP"_ and does
-  **not** launch anything. Plain `oxlint`/`oxfmt` won't be
+- **`{ root, vpPath }`** — Vite+ and runnable. `vpPath` is either a
+  project-scoped `.bin/vp` (preferred, Phase 2) or a globally-resolved
+  binary (Phase 3 fallback). Editor launches `<vpPath> lint --lsp` /
+  `<vpPath> fmt --lsp`. If launching errors (e.g. a very old
+  `vite-plus` whose `vp` doesn't yet recognize `--lsp`), surface an
+  "upgrade vite-plus" hint at that point.
+- **`{ root }`** — declared but no usable `vp` anywhere (no
+  project-scoped install AND no global). Editor surfaces an install
+  hint such as _"Vite+ detected — run `pnpm install` to enable LSP"_
+  and does **not** launch anything. Plain `oxlint`/`oxfmt` won't be
   Vite+-aware without the wrapper's `VP_VERSION` environment
   variable, so falling through silently would lose Vite+ behaviour
   rather than approximate it.
@@ -141,15 +154,17 @@ flowchart TD
     P1Up --> P1Read
     P1Bound -- yes --> ResultNull(["return null"])
 
-    P1Found --> P2Begin[/"PHASE 2<br/>find runnable binary<br/>probe = root"/]
-    P2Begin --> P2Valid{"probe/node_modules/vite-plus/package.json<br/>parses with name = 'vite-plus'?"}
-    P2Valid -- yes --> P2Shim{"probe/node_modules/.bin/vp<br/>(or vp.cmd on Windows)<br/>exists?"}
+    P1Found --> P2Begin[/"PHASE 2<br/>project-scoped binary<br/>probe = root"/]
+    P2Begin --> P2Shim{"probe/node_modules/.bin/vp<br/>(or vp.cmd on Windows)<br/>exists?"}
     P2Shim -- yes --> ResultRunnable(["return { root, vpPath }"])
-    P2Shim -- no --> P2Bound
-    P2Valid -- no, orphan --> P2Bound{"probe is root workspace<br/>or filesystem root?"}
+    P2Shim -- no --> P2Bound{"probe is root workspace<br/>or filesystem root?"}
     P2Bound -- no --> P2Up["probe = parent(probe)"]
-    P2Up --> P2Valid
-    P2Bound -- yes --> ResultDeclared(["return { root }"])
+    P2Up --> P2Shim
+    P2Bound -- yes --> P3Begin[/"PHASE 3<br/>global fallback"/]
+
+    P3Begin --> P3Path{"vp on $PATH<br/>or in global<br/>node_modules?"}
+    P3Path -- yes --> ResultRunnable
+    P3Path -- no --> ResultDeclared(["return { root }"])
 ```
 
 ### Root workspace markers
@@ -173,29 +188,40 @@ follow-up that does not block this RFC.
 
 ### What we deliberately do not check
 
-- `$PATH`, user's global `node_modules`, or
-  `oxc.<tool>.binPath` settings (the last is for oxlint/oxfmt, not
-  `vp`).
+Phase 1 (identity) deliberately ignores:
+
+- `$PATH`, user's global `node_modules`, and
+  `oxc.<tool>.binPath` settings — none of these say anything about
+  whether _this workspace_ uses Vite+. (The last is for oxlint/oxfmt,
+  not `vp`, anyway.)
 - `require.resolve("vite-plus")` — Node's resolution algorithm can
   escape the root workspace.
 - A `node_modules/vite-plus/` without a direct dep declaration (a
   transitive install).
-- A `node_modules/vite-plus/` whose `package.json` is missing,
-  unparseable, or has the wrong `name` (orphan).
+- The contents of `node_modules/vite-plus/package.json`. Phase 2
+  trusts the package manager's `.bin/vp` shim — if it exists, vp is
+  considered installed. A stale shim that points at a removed install
+  will fail at spawn time and surface the upgrade hint.
+
+Phases 2 and 3 (binary resolution) only run **after** Phase 1 has
+confirmed Vite+. Once that gate is passed, `$PATH` and global
+`node_modules` _are_ in scope (Phase 3) — they answer "where is the
+`vp` the user already opted in to?", not "is this Vite+ at all?".
+The other identity exclusions above still apply.
 
 ## Reference TypeScript implementation
 
 ```ts
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 
 export interface DetectResult {
   /** Workspace ancestor whose package.json directly declares vite-plus. */
   root: string;
   /**
-   * Absolute path to a runnable, project-scoped vp binary, when one
-   * is installed inside the workspace. Undefined when vite-plus is
-   * declared but not yet installed.
+   * Absolute path to a runnable vp binary — preferably a project-scoped
+   * install, otherwise a globally-resolved one found via $PATH. Undefined
+   * when vite-plus is declared but no usable vp exists locally or globally.
    */
   vpPath?: string;
 }
@@ -218,18 +244,25 @@ function declaresVitePlus(pkg: any | null): boolean {
   return Boolean(pkg?.dependencies?.['vite-plus'] || pkg?.devDependencies?.['vite-plus']);
 }
 
-/** Return the .bin/vp shim path iff a valid vite-plus install lives at `dir`. */
+/** Return the .bin/vp shim path iff it exists at `dir/node_modules/.bin/`. */
 function resolveVpAt(dir: string): string | null {
-  try {
-    const pkg = JSON.parse(
-      readFileSync(join(dir, 'node_modules', 'vite-plus', 'package.json'), 'utf8'),
-    );
-    if (pkg?.name !== 'vite-plus') return null;
-  } catch {
-    return null;
-  }
   const shim = join(dir, 'node_modules', '.bin', process.platform === 'win32' ? 'vp.cmd' : 'vp');
   return existsSync(shim) ? shim : null;
+}
+
+/**
+ * Search $PATH for the vp binary. Extensions with their own global
+ * `node_modules` lookup (e.g. oxc-vscode's searchGlobalNodeModulesBin)
+ * should chain that ahead of or after this call as appropriate.
+ */
+function resolveGlobalVp(): string | null {
+  const binName = process.platform === 'win32' ? 'vp.cmd' : 'vp';
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, binName);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 export function detectVitePlusProjectSync(start: string): DetectResult | null {
@@ -251,8 +284,8 @@ export function detectVitePlusProjectSync(start: string): DetectResult | null {
   }
   if (!root) return null;
 
-  // Phase 2: walk up from root looking for a real install, bounded by
-  // the root workspace. Reuses Phase 1's package.json read at `root`.
+  // Phase 2: walk up from root looking for a project-scoped install,
+  // bounded by the root workspace. Reuses Phase 1's package.json read.
   let probe: string | null = root;
   let pkg = rootPkg;
   while (probe) {
@@ -264,6 +297,10 @@ export function detectVitePlusProjectSync(start: string): DetectResult | null {
     probe = parent;
     pkg = readPackageJson(probe);
   }
+
+  // Phase 3: fall back to a global vp now that Vite+ is confirmed.
+  const globalVp = resolveGlobalVp();
+  if (globalVp) return { root, vpPath: globalVp };
 
   return { root };
 }
@@ -282,27 +319,35 @@ same everywhere. The path returned for spawning differs by extension,
 mirroring whatever pattern that extension already uses for
 `oxlint`/`oxfmt`:
 
-- **`oxc-vscode`, `coc-oxc`** — target `node_modules/.bin/vp`
+- **`oxc-vscode`, `coc-oxc`** — Phase 2 targets `node_modules/.bin/vp`
   (`vp.cmd` on Windows), the same shim path they already use for
-  `oxlint`. Call the detector before the existing
-  `findBinary("oxlint" | "oxfmt", ...)` chain. Do **not** parameterize
-  the existing chain with `"vp"` as a target — its
-  `searchSettingsBin`, `searchGlobalNodeModulesBin`, `searchEnvPath`,
-  and `require.resolve` paths can escape the root workspace or
-  consult settings meant for oxlint/oxfmt.
+  `oxlint`. Phase 3 may additionally consult oxc-vscode's
+  `searchGlobalNodeModulesBin` and `searchEnvPath`
+  (`client/findBinary.ts`) — they're in scope here precisely because
+  Phase 1 has already confirmed Vite+. Do **not** parameterize the
+  existing chain's identity-style sources (`searchSettingsBin`,
+  `require.resolve`) with `"vp"` — those still belong in the
+  do-not-check list for Phase 1.
 - **`oxc-zed`** — keep targeting `node_modules/vite-plus/bin/vp` (the
   pattern Zed already uses, `src/lsp.rs:47`, because pnpm's `.bin`
   shell shims aren't suitable for Zed's headless WASM execution
   context). Replace the `[package_name, "vite-plus"]` loop at
-  `lsp.rs:28` with the two-phase check ported into Rust. Update
-  `language_server_command` to pass `["lint", "--lsp"]` /
-  `["fmt", "--lsp"]`. Zed's WASM API only reads the worktree root, so
-  deeper walk-up is a known limitation worth noting in the Zed PR.
+  `lsp.rs:28` with Phase 1 ported into Rust, then attempt Phase 2 at
+  `worktree.root_path()`. Phase 3 is **not implementable in Zed
+  today** — the WASM extension API exposes neither `$PATH` nor a
+  process-spawn capability to query global `node_modules`, so Zed
+  effectively returns `{ root }` whenever Phase 2 fails. Track Zed's
+  API roadmap; revisit when filesystem traversal and PATH lookups
+  become available. Update `language_server_command` to pass
+  `["lint", "--lsp"]` / `["fmt", "--lsp"]`.
 - **`oxc-intellij-plugin`** — `VitePlusPackage.kt` already locates
   `vite-plus` via IntelliJ's `NodePackageDescriptor` and appends
   `bin/<name>`. Tighten it to require a direct dep, change the
   returned path from `<vite-plus>/bin/oxlint` to `<vite-plus>/bin/vp`,
-  update launch args.
+  update launch args. For Phase 3, fall back to IntelliJ's interpreter
+  resolution (`NodePackage.findDefaultPackage(project, "vite-plus",
+interpreter)`) which already searches the user's globally installed
+  Node packages.
 
 ## Conformance fixtures
 
@@ -320,12 +365,13 @@ IntelliJ — substitute their own equivalent. The fixture just asserts
 | `root-declared-and-installed`           | Root `package.json` declares `vite-plus` + valid `node_modules/vite-plus/` install                                                             | `{ root: "<repo>", vpPath: "<repo>/node_modules/.bin/vp" }`                                                 |
 | `pnpm-subpackage-declared-root-hoisted` | `pnpm-workspace.yaml` at `<repo>`, `packages/app/package.json` declares `vite-plus`, install hoisted to `<repo>/node_modules/vite-plus/`       | From `packages/app/`: `{ root: "<repo>/packages/app", vpPath: "<repo>/node_modules/.bin/vp" }`              |
 | `npm-subpackage-direct-dep-unhoisted`   | Root `package.json` with `workspaces`, `packages/app/package.json` declares `vite-plus`, install inside `packages/app/node_modules/vite-plus/` | From `packages/app/`: `{ root: "<repo>/packages/app", vpPath: "<repo>/packages/app/node_modules/.bin/vp" }` |
-| `root-declared-no-install`              | Root `package.json` declares `vite-plus`, no `node_modules` (fresh clone)                                                                      | `{ root: "<repo>" }` — install hint                                                                         |
+| `root-declared-no-local-no-global`      | Root `package.json` declares `vite-plus`, no `node_modules`, no `vp` on `$PATH`                                                                | `{ root: "<repo>" }` — install hint                                                                         |
+| `root-declared-no-local-global-on-path` | Root `package.json` declares `vite-plus`, no project-scoped install, but `vp` is on `$PATH`                                                    | `{ root: "<repo>", vpPath: "<PATH-resolved>/vp" }` — Phase 3 global fallback                                |
 | `transitive-install`                    | No walked-up `package.json` declares `vite-plus`, but `node_modules/vite-plus/` exists as a transitive dep                                     | `null` — no direct declaration                                                                              |
-| `bin-vp-orphan`                         | Declared in root `package.json`, but `node_modules/vite-plus/` is broken (missing `package.json`, wrong `name`, or unparseable)                | `{ root: "<repo>" }` — install rejected as orphan                                                           |
+| `global-vp-without-declaration`         | Plain Node project, no declaration; `vp` is on `$PATH` and/or in the user's global `node_modules`                                              | `null` — Phase 1 fails, so Phase 3 never runs                                                               |
 | `parent-vite-plus-nested-repo`          | Outer dir declares + installs `vite-plus`; inner subdir is its own root workspace and does not                                                 | From inside the nested workspace: `null`                                                                    |
 | `plain-non-vite-plus`                   | A normal Node project, no `vite-plus` anywhere                                                                                                 | `null`                                                                                                      |
-| `yarn4-pnp`                             | Berry/PnP, no `node_modules`, root `package.json` declares `vite-plus`                                                                         | `{ root: "<repo>" }` — install hint                                                                         |
+| `yarn4-pnp`                             | Berry/PnP, no `node_modules`, root `package.json` declares `vite-plus`                                                                         | `{ root: "<repo>" }` — install hint (no project-scoped or global binary)                                    |
 
 ## Open questions
 
