@@ -60,6 +60,9 @@ pub enum Error {
     IgnoreError(#[from] ignore::Error),
 
     #[error(transparent)]
+    SerdeYml(#[from] serde_yml::Error),
+
+    #[error(transparent)]
     WorkspaceError(#[from] vite_workspace::Error),
 
     #[error("Lint failed, reason: {reason}")]
