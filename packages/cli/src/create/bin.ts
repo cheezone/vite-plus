@@ -1300,14 +1300,15 @@ Use \`vp create --list\` to list all available templates, or run \`vp create --h
   // migrate before the vite-plus rewrite so the generated .oxlintrc/.oxfmtrc
   // get merged into vite.config.ts — matching `vp migrate`. Pin the
   // packageManager field (vite_install hardcodes pnpm in CI/non-TTY when no
-  // signal is present) and force yarn's classic node_modules layout
-  // (Plug'n'Play zip entries break @oxlint/migrate's fileURLToPath resolution).
+  // signal is present) and force yarn's pnpm linker (its node_modules entries
+  // are real on-disk files, unlike Plug'n'Play zip entries that break
+  // @oxlint/migrate's fileURLToPath resolution).
   const installAndMigrate = async (installCwd: string) => {
     setPackageManager(fullPath, workspaceInfo.downloadPackageManager);
     if (workspaceInfo.packageManager === PackageManager.yarn) {
       const yarnrcPath = path.join(fullPath, '.yarnrc.yml');
       if (!fs.existsSync(yarnrcPath)) {
-        fs.writeFileSync(yarnrcPath, 'nodeLinker: node-modules\n');
+        fs.writeFileSync(yarnrcPath, 'nodeLinker: pnpm\n');
       }
     }
     updateCreateProgress('Installing dependencies');

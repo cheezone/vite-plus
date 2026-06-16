@@ -1525,7 +1525,7 @@ function rewriteYarnrcYml(projectPath: string): void {
 
   editYamlFile(yarnrcYmlPath, (doc) => {
     if (!doc.has('nodeLinker')) {
-      doc.set('nodeLinker', 'node-modules');
+      doc.set('nodeLinker', 'pnpm');
     }
     // catalog
     rewriteCatalog(doc);

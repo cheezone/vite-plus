@@ -1340,7 +1340,7 @@ describe('ensureVitePlusBootstrap', () => {
       nodeLinker: string;
       catalog: Record<string, string>;
     };
-    expect(yarnrc.nodeLinker).toBe('node-modules');
+    expect(yarnrc.nodeLinker).toBe('pnpm');
     expect(yarnrc.catalog.vite).toBe('npm:@voidzero-dev/vite-plus-core@latest');
     expect(yarnrc.catalog.vitest).toBe('npm:@voidzero-dev/vite-plus-test@latest');
     expect(yarnrc.catalog['vite-plus']).toBe('latest');
@@ -1723,7 +1723,7 @@ describe('rewriteMonorepo yarn catalog', () => {
       nodeLinker: string;
       catalogs: Record<string, Record<string, string>>;
     };
-    expect(yarnrc.nodeLinker).toBe('node-modules');
+    expect(yarnrc.nodeLinker).toBe('pnpm');
     expect(yarnrc.catalogs.vite7.vite).toBe('npm:@voidzero-dev/vite-plus-core@latest');
     expect(yarnrc.catalogs.vite7.react).toBe('^18.0.0');
     expect(yarnrc.catalogs.test.vitest).toBe('npm:@voidzero-dev/vite-plus-test@latest');

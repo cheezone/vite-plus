@@ -352,12 +352,12 @@ describe('renameFiles', () => {
 
   it('renames `_npmrc` and `_yarnrc.yml`', () => {
     write('_npmrc', 'auto-install-peers=true\n');
-    write('_yarnrc.yml', 'nodeLinker: node-modules\n');
+    write('_yarnrc.yml', 'nodeLinker: pnpm\n');
     renameFiles(projectDir);
     expect(exists('_npmrc')).toBe(false);
     expect(exists('_yarnrc.yml')).toBe(false);
     expect(read('.npmrc')).toBe('auto-install-peers=true\n');
-    expect(read('.yarnrc.yml')).toBe('nodeLinker: node-modules\n');
+    expect(read('.yarnrc.yml')).toBe('nodeLinker: pnpm\n');
   });
 
   it('is a no-op when no source files exist', () => {

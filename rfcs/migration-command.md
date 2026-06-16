@@ -547,10 +547,13 @@ peerDependencyRules:
 `.yarnrc.yml`
 
 ```yaml
+nodeLinker: pnpm
 catalog:
   vite: npm:@voidzero-dev/vite-plus-core@latest
   vitest: npm:@voidzero-dev/vite-plus-test@latest
 ```
+
+`nodeLinker` is only added when absent, so a project that already pins a linker keeps its own value. The `pnpm` linker is used (real on-disk `node_modules` entries via a content-addressable store) rather than yarn's default Plug'n'Play, whose zip entries break `@oxlint/migrate`'s `fileURLToPath` resolution.
 
 `package.json`
 
